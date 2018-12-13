@@ -51,6 +51,47 @@ def center_2d_points(pts):
     return np.vstack([new_x, new_y]).T, T
 
 
+def select_best_fundamental_matrix(F1, F2, matches):
+    """
+    Will compare matches with the matrices and select the best fitting model
+
+    Args:
+        F1: fundamental matrix
+        F2: fundamental matrix
+        matches: list of pairs of 2D points, stored as a Nx4 numpy array
+
+    Returns:
+        the list of matches that satisfy the constraint. It is a sub-list of
+        the input list.
+    """
+    F1_score = 0
+    F2_score = 0
+    for match in matches:
+        x = np.array([match[0], match[1], 1])
+        xx = np.array([match[2], match[3], 1])
+        d11 = evaluation.distance_point_to_line(x, np.dot(F1.T, xx))
+        d12 = evaluation.distance_point_to_line(xx, np.dot(F1, x))
+        d21 = evaluation.distance_point_to_line(x, np.dot(F2.T, xx))
+        d22 = evaluation.distance_point_to_line(xx, np.dot(F2, x))
+        F1_score += (d11 + d12)/2.
+        F2_score += (d21 + d22)/2.
+
+    average_F1 = F1_score/len(matches)
+    average_F2 = F2_score/len(matches)
+    ratio = average_F2/average_F1
+
+    print("Average distance for finer matrix is {} \
+        average distance for coarser matrix is {}".format(average_F1, average_F2))
+    print("ratio is {} difference is {}".format(average_F2/average_F1, average_F2 - average_F1))
+
+    if ratio < 40:
+        print("We chose finer F")
+        return F1
+    else:
+        print("We chose coarser_F")
+        return F2
+
+
 def filter_matches_epipolar_constraint(F, matches, thresh):
     """
     Discards matches that are not consistent with the epipolar constraint.
@@ -220,7 +261,7 @@ def disparity_range(rpc1, rpc2, x, y, w, h, H1, H2, matches, A=None):
         disp: 2-uple containing the horizontal disparity range
     """
     # Default disparity range to return if everything else breaks
-    disp = (-3,3)
+    disp = (-20,20)
     exogenous_disp = None
     sift_disp = None
     alt_disp  = None
@@ -285,7 +326,7 @@ def disparity_range(rpc1, rpc2, x, y, w, h, H1, H2, matches, A=None):
     return disp
 
 
-def rectification_homographies(matches, x, y, w, h):
+def rectification_homographies(matches, x, y, w, h, coarser_F=None):
     """
     Computes rectifying homographies from point matches for a given ROI.
 
@@ -299,6 +340,8 @@ def rectification_homographies(matches, x, y, w, h):
         x, y, w, h: four integers defining the rectangular ROI in the first
             image. (x, y) is the top-left corner, and (w, h) are the dimensions
             of the rectangle.
+        coarser_F: a numpy array of shape (3, 3) representing the Fundamental matrix
+            of previous scale
     Returns:
         S1, S2, F: three numpy arrays of shape (3, 3) representing the
         two rectifying similarities to be applied to the two images and the
@@ -306,6 +349,12 @@ def rectification_homographies(matches, x, y, w, h):
     """
     # estimate the affine fundamental matrix with the Gold standard algorithm
     F = estimation.affine_fundamental_matrix(matches)
+
+    if coarser_F is not None:
+        Z = np.array([[0.5, 0, 0], [0, 0.5, 0], [0, 0, 1]])
+        coarser_F = np.dot(Z, np.dot(coarser_F, Z))
+        F = select_best_fundamental_matrix(F, coarser_F, matches)
+
 
     # compute rectifying similarities
     S1, S2 = estimation.rectifying_similarities_from_affine_fundamental_matrix(F, cfg['debug'])
@@ -321,11 +370,13 @@ def rectification_homographies(matches, x, y, w, h):
     pts = common.points_apply_homography(S1, [[x, y], [x+w, y], [x+w, y+h], [x, y+h]])
     x0, y0 = common.bounding_box2D(pts)[:2]
     T = common.matrix_translation(-x0, -y0)
-    return np.dot(T, S1), np.dot(T, S2), F
+
+    
+    return np.dot(T, S1), np.dot(T, S2), F 
 
 
 def rectify_pair(im1, im2, rpc1, rpc2, x, y, w, h, out1, out2, A=None,
-                 sift_matches=None, method='rpc', hmargin=0, vmargin=0):
+                 sift_matches=None, method='rpc', hmargin=0, vmargin=0, coarse_F=None):
     """
     Rectify a ROI in a pair of images.
 
@@ -369,7 +420,9 @@ def rectify_pair(im1, im2, rpc1, rpc2, x, y, w, h, out1, out2, A=None,
         matches = sift_matches
 
     # compute rectifying homographies
-    H1, H2, F = rectification_homographies(matches, x, y, w, h)
+    #coarser_F = np.array([[0, 0, -0.706835], [0, 0, 0.000037], [0.707378, -0.000061, 1.978241]]) # 64
+    #coarser_F = np.array([[0, 0, -0.353417], [0, 0, 0.000018], [0.353689, -0.000030, 1.978241]]) # 32 bottom
+    H1, H2, F = rectification_homographies(matches, x, y, w, h, coarse_F)
 
     if cfg['register_with_shear']:
         # compose H2 with a horizontal shear to reduce the disparity range
@@ -381,8 +434,16 @@ def rectify_pair(im1, im2, rpc1, rpc2, x, y, w, h, out1, out2, A=None,
         m = np.vstack({tuple(row) for row in m})  # remove duplicates due to no alt range
         H2 = register_horizontally_shear(m, H1, H2)
 
+    if cfg['debug']:
+        out_dir = os.path.dirname(out1)
+        np.savetxt(os.path.join(out_dir, 'sift_matches_disp_before_filter.txt'),
+                   sift_matches, fmt='%9.3f')
+        visualisation.plot_matches(im1, im2, rpc1, rpc2, sift_matches, x, y, w, h,
+                                   os.path.join(out_dir, 'sift_matches_disp_before_filter.png'))
+
     # compose H2 with a horizontal translation to center disp range around 0
     if sift_matches is not None:
+        print("We are actually using F somewhere")
         sift_matches = filter_matches_epipolar_constraint(F, sift_matches,
                                                           cfg['epipolar_thresh'])
         if len(sift_matches) < 10:
@@ -432,4 +493,4 @@ def rectify_pair(im1, im2, rpc1, rpc2, x, y, w, h, out1, out2, A=None,
         disp_m = pts_out[1,:] - pts_out[0,:]
         disp_M = pts_out[2,:] - pts_out[0,:]
 
-    return H1, H2, disp_m, disp_M
+    return H1, H2, disp_m, disp_M, F

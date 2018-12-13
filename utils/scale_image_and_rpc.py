@@ -27,49 +27,48 @@ class ImageRPCModifier():
     def __init__(self):
         self.available_filters = ['near', 'bilinear',
                      'cubic', 'cubicspline', 'lanczos', 'average']
+        self.write_folder = "/tmp"
 
 
-    def scale_and_crop(self, image_in, rpc_in, write_folder, scaling_filter, scale_x, crop, scale_first=False, scale_y=None):
+    def scale_and_crop(self, image_in, rpc_in, write_folder, scaling_filter, scale_x, crop, scale_first=False, scale_y=None, suffix=""):
+        
+        self.write_folder = write_folder
+
         # Either scales, crops or does both an image and a RPC file
 
         if not crop and not scaling_filter:
             print("Neither crop nor scaling filter was provided, nothing was done")
             return(0)
 
-        if not os.path.exists(write_folder):
-            os.makedirs(write_folder)
+        if not os.path.exists(self.write_folder):
+            os.makedirs(self.write_folder)
+
+        rpc_out = self._get_output_name(rpc_in, suffix)
+        image_out = self._get_output_name(image_in, suffix)
 
         if crop and not scaling_filter:
             print("Only croping.")
-            self.crop_image_and_rpc(image_in, rpc_in, write_folder, crop)
+            self.crop_image_and_rpc(image_in, image_out, rpc_in, rpc_out, crop)
             return(0)
 
         if scaling_filter and not crop:
             print("Only scaling.")
-            self.scale_image_and_rpc(image_in, rpc_in, write_folder, scaling_filter, scale_x, scale_y)
+            self.scale_image_and_rpc(image_in, image_out, rpc_in, rpc_out, scaling_filter, scale_x, scale_y)
             return(0)
 
         else:
             if scale_first:
                 print("Scaling then croping")
-                self.scale_image_and_rpc(image_in, rpc_in, write_folder, scaling_filter, scale_x, scale_y)
-                new_image_in = self._get_output_name(write_folder, image_in, False)
-                new_rpc_in = self._get_output_name(write_folder, rpc_in, False)
-                self.crop_image_and_rpc(new_image_in, new_rpc_in, write_folder, crop)
-                os.remove(new_image_in)
-                os.remove(new_rpc_in)
+                self.scale_image_and_rpc(image_in, image_out, rpc_in, rpc_out, scaling_filter, scale_x, scale_y)
+                self.crop_image_and_rpc(image_out, image_out, rpc_out, rpc_out, crop)
                 return(0)
             else:
                 print("Croping then scaling")
-                self.crop_image_and_rpc(image_in, rpc_in, image_out, rpc_out, crop)
-                new_image_in = self._get_output_name(write_folder, image_in)
-                new_rpc_in = self._get_output_name(write_folder, rpc_in)
-                self.scale_image_and_rpc(new_image_in, new_rpc_in, write_folder, scaling_filter, scale_x, scale_y)
-                os.remove(new_image_in)
-                os.remove(new_rpc_in)
+                self.crop_image_and_rpc(image_in, image_out, rpc_in, rpc_out, crop)
+                self.scale_image_and_rpc(image_out, image_out, rpc_out, rpc_out, scaling_filter, scale_x, scale_y)
                 return(0)
 
-    def scale_image_and_rpc(self, image_in, rpc_in, write_folder, scaling_filter, scale_x, scale_y=None):
+    def scale_image_and_rpc(self, image_in, image_out, rpc_in, rpc_out, scaling_filter, scale_x, scale_y=None):
         scale_x = float(scale_x)
         if scale_y is None:
             scale_y = scale_x
@@ -77,16 +76,13 @@ class ImageRPCModifier():
             scale_y = float(scale_y)
         assert scaling_filter in self.available_filters
 
-        self.scale_image(image_in, write_folder, scaling_filter, scale_x, scale_y)
+        self.scale_image(image_in, image_out, scaling_filter, scale_x, scale_y)
         rpc_model = self.scale_rpc(rpc_in, scale_x, scale_y)
-        rpc_out = self._get_output_name(write_folder, rpc_in, False)
         self.write_rpc(rpc_model, rpc_out)
         return(0)
 
 
-    def scale_image(self, image_in, write_folder, scaling_filter, scale_x, scale_y):
-
-        image_out = self._get_output_name(write_folder, image_in, False)
+    def scale_image(self, image_in, image_out, scaling_filter, scale_x, scale_y):
 
         # generate image
         print("Generating {} ...".format(image_out))
@@ -96,7 +92,7 @@ class ImageRPCModifier():
 
         # Generate a temporary vrt file to have the proper geotransform
         fd, tmp_vrt = tempfile.mkstemp(suffix='.vrt',
-                                       dir=write_folder)
+                                       dir=self.write_folder)
 
         os.close(fd)
 
@@ -137,23 +133,21 @@ class ImageRPCModifier():
         rpc_model.write(rpc_out)
 
 
-    def crop_image_and_rpc(self, image_in, rpc_in, write_folder, crop):
+    def crop_image_and_rpc(self, image_in, image_out, rpc_in, rpc_out, crop):
         # crop should be x_min, y_min, width, height
 
         assert len(crop) == 4
 
-        self.crop_image(image_in, write_folder, crop)
+        self.crop_image(image_in, self.write_folder, crop)
         rpc_model = self.crop_rpc(rpc_in, crop)
-        rpc_out = self._get_output_name(write_folder, rpc_in)
         self.write_rpc(rpc_model, rpc_out)
         return(0)
 
-    def crop_image(self, image_in, write_folder, crop):
+    def crop_image(self, image_in, image_out, crop):
         # crop should be x_min, y_min, width, height
 
         x_min, y_min, width, height = crop
 
-        image_out = self._get_output_name(write_folder, image_in)
         # generate image
         print("Croping to image {} ...".format(image_out))
 
@@ -181,12 +175,9 @@ class ImageRPCModifier():
         return(r)
 
 
-    def _get_output_name(self, write_folder, file_path, crop=True):
+    def _get_output_name(self, file_path, suffix):
         _, file_name = os.path.split(file_path) 
-        if crop:
-            new_file_name = os.path.join(write_folder, file_name.replace(".", "_cropped."))
-        else:
-            new_file_name = os.path.join(write_folder, file_name.replace(".", "_scaled."))
+        new_file_name = os.path.join(self.write_folder, file_name.replace(".", "{}.".format(suffix)))
         return new_file_name
 
 
@@ -243,6 +234,8 @@ if __name__ == "__main__":
                         help='crop information: x_min, y_min, width, height.')
     parser.add_argument('--scale_first', type=bool, default=True,
                         help='Defautl is True: in case of croping and scaling, wheter to scale first or not.')
+    parser.add_argument('--suffix', type=str, default="",
+                        help='Defautl is empty: string to add after the name of the created_file.')
 
 
     args = parser.parse_args()

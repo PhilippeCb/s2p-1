@@ -96,6 +96,23 @@ def check_parameters(d):
                 print('WARNING: ignoring unknown parameter {}.'.format(k))
 
 
+def update_multi_scale_cfg(tmp_dir, scale):
+
+    cfg['images_original'] = copy.deepcopy(cfg['images'])
+    cfg['roi_original'] = cfg['roi'].copy()
+
+    cfg['images'][0]["img"] = os.path.join(tmp_dir, cfg['images'][0]["img"].replace(".", "_0_{}.".format(scale)).split("/")[-1])
+    cfg['images'][0]["rpc"] = os.path.join(tmp_dir, cfg['images'][0]["rpc"].replace(".", "_0_{}.".format(scale)).split("/")[-1])
+    cfg['images'][1]["img"] = os.path.join(tmp_dir, cfg['images'][1]["img"].replace(".", "_1_{}.".format(scale)).split("/")[-1])
+    cfg['images'][1]["rpc"] = os.path.join(tmp_dir, cfg['images'][1]["rpc"].replace(".", "_1_{}.".format(scale)).split("/")[-1])
+
+    x = cfg['roi']['x']
+    y = cfg['roi']['y']
+    w = cfg['roi']['w']
+    h = cfg['roi']['h']
+    
+    cfg['roi'] = {'x': x/scale, 'y': y/scale, 'w': w/scale, 'h': h/scale}
+
 def build_cfg(user_cfg):
     """
     Populate a dictionary containing the s2p parameters from a user config file.
@@ -238,6 +255,8 @@ def create_tile(coords, neighborhood_coords_dict):
 
     tile_json = os.path.join(get_tile_dir(x,y,w,h),'config.json')
     tile['json'] = tile_json
+
+    tile['coarse_F'] = None
 
     return tile
 

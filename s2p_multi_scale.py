@@ -46,6 +46,8 @@ from s2plib import triangulation
 from s2plib import fusion
 from s2plib import visualisation
 
+from utils.scale_image_and_rpc import ImageRPCModifier
+
 
 def pointing_correction(tile, i):
     """
@@ -118,6 +120,7 @@ def rectification_pair(tile, i):
     """
     out_dir = os.path.join(tile['dir'], 'pair_{}'.format(i))
     x, y, w, h = tile['coordinates']
+    coarse_F = tile['coarse_F']
     img1 = cfg['images'][0]['img']
     rpc1 = cfg['images'][0]['rpc']
     img2 = cfg['images'][i]['img']
@@ -173,7 +176,10 @@ def rectification_pair(tile, i):
                                                             rpc2, x, y, w, h,
                                                             rect1, rect2, A, m,
                                                             hmargin=cfg['horizontal_margin'],
-                                                            vmargin=cfg['vertical_margin'])
+                                                            vmargin=cfg['vertical_margin'],
+                                                            coarse_F=coarse_F)
+    tile['coarse_F'] = F 
+    print(tile)
     np.savetxt(os.path.join(out_dir, 'H_ref.txt'), H1, fmt='%12.6f')
     np.savetxt(os.path.join(out_dir, 'H_sec.txt'), H2, fmt='%12.6f')
     np.savetxt(os.path.join(out_dir, 'F.txt'), F, fmt='%12.6f')
@@ -710,8 +716,12 @@ def main(user_cfg, steps=ALL_STEPS):
         user_cfg: user config dictionary
         steps: either a string (single step) or a list of strings (several
             steps)
-    """
+    """ 
+
+    modifier = ImageRPCModifier()
+
     common.print_elapsed_time.t0 = datetime.datetime.now()
+
     initialization.build_cfg(user_cfg)
     if 'initialisation' in steps:
         initialization.make_dirs()
@@ -721,6 +731,44 @@ def main(user_cfg, steps=ALL_STEPS):
     if cfg['max_processes'] is not None:
         nb_workers = cfg['max_processes']
 
+    for scale in user_cfg['scales']:
+        modifier.scale_and_crop(cfg['images'][0]['img'], cfg['images'][0]['rpc'], 
+                     cfg['temporary_dir'], "bilinear", scale, crop=None, suffix="_0_{}".format(scale))
+        modifier.scale_and_crop(cfg['images'][1]["img"], cfg['images'][1]["rpc"], 
+                     cfg['temporary_dir'], "bilinear", scale, crop=None, suffix="_1_{}".format(scale))
+
+        initialization.update_multi_scale_cfg(cfg['temporary_dir'], scale)
+        # create the multi scale images use for each tile the optimal fundamental matrix
+
+
+        tw, th = initialization.adjust_tile_size()
+        tiles_txt = os.path.join(cfg['temporary_dir'],'tiles.txt')
+        create_masks = 'initialisation' in steps
+        tiles = initialization.tiles_full_info(tw, th, tiles_txt, create_masks)
+
+        if 'initialisation' in steps:
+            # Write the list of json files to outdir/tiles.txt
+            with open(tiles_txt,'w') as f:
+                for t in tiles:
+                    f.write(t['json']+os.linesep)
+
+        n = len(cfg['images'])
+        tiles_pairs = [(t, i) for i in range(1, n) for t in tiles]
+
+        if 'local-pointing' in steps:
+            print('correcting pointing locally...')
+            parallel.launch_calls(pointing_correction, tiles_pairs, nb_workers)
+
+        if 'global-pointing' in steps:
+            print('correcting pointing globally...')
+            global_pointing_correction(tiles)
+            common.print_elapsed_time()
+
+        if 'rectification' in steps:
+            print('rectifying tiles...')
+            parallel.launch_calls(rectification_pair, tiles_pairs, nb_workers)
+
+    return 0
     tw, th = initialization.adjust_tile_size()
     tiles_txt = os.path.join(cfg['out_dir'],'tiles.txt')
     create_masks = 'initialisation' in steps
@@ -790,6 +838,7 @@ def main(user_cfg, steps=ALL_STEPS):
     # cleanup
     common.garbage_cleanup()
     common.print_elapsed_time(since_first_call=True)
+
 
 
 def make_path_relative_to_file(path, f):
