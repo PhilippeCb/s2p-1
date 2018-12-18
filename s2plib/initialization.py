@@ -96,22 +96,43 @@ def check_parameters(d):
                 print('WARNING: ignoring unknown parameter {}.'.format(k))
 
 
-def update_multi_scale_cfg(tmp_dir, scale):
+def update_multi_scale_cfg(tmp_dir, scale, before_rectification=True):
+    """
+    Changes the config to save the original images paths and puts the scaled results in front
 
-    cfg['images_original'] = copy.deepcopy(cfg['images'])
-    cfg['roi_original'] = cfg['roi'].copy()
+    Args:
+        tmp_dir: temporary directory used to save temporary results (path from user config)
+        scale: amout of rescaling done to the original image 
+        before_rectification: boolean of wether this happens before rectification or after
+    """
+    if before_rectification:
 
-    cfg['images'][0]["img"] = os.path.join(tmp_dir, cfg['images'][0]["img"].replace(".", "_0_{}.".format(scale)).split("/")[-1])
-    cfg['images'][0]["rpc"] = os.path.join(tmp_dir, cfg['images'][0]["rpc"].replace(".", "_0_{}.".format(scale)).split("/")[-1])
-    cfg['images'][1]["img"] = os.path.join(tmp_dir, cfg['images'][1]["img"].replace(".", "_1_{}.".format(scale)).split("/")[-1])
-    cfg['images'][1]["rpc"] = os.path.join(tmp_dir, cfg['images'][1]["rpc"].replace(".", "_1_{}.".format(scale)).split("/")[-1])
+        cfg['images_original'] = copy.deepcopy(cfg['images'])
+        cfg['out_dir_original'] = copy.deepcopy(cfg['out_dir'])
+        cfg['roi_original'] = cfg['roi'].copy()
 
-    x = cfg['roi']['x']
-    y = cfg['roi']['y']
-    w = cfg['roi']['w']
-    h = cfg['roi']['h']
-    
-    cfg['roi'] = {'x': x/scale, 'y': y/scale, 'w': w/scale, 'h': h/scale}
+        cfg['out_dir'] = copy.deepcopy(cfg['temporary_dir'])
+
+
+        cfg['images'][0]["img"] = os.path.join(tmp_dir, cfg['images'][0]["img"].replace(".", "_0_{}.".format(scale)).split("/")[-1])
+        cfg['images'][0]["rpc"] = os.path.join(tmp_dir, cfg['images'][0]["rpc"].replace(".", "_0_{}.".format(scale)).split("/")[-1])
+        cfg['images'][1]["img"] = os.path.join(tmp_dir, cfg['images'][1]["img"].replace(".", "_1_{}.".format(scale)).split("/")[-1])
+        cfg['images'][1]["rpc"] = os.path.join(tmp_dir, cfg['images'][1]["rpc"].replace(".", "_1_{}.".format(scale)).split("/")[-1])
+
+        x = cfg['roi']['x']
+        y = cfg['roi']['y']
+        w = cfg['roi']['w']
+        h = cfg['roi']['h']
+        
+        cfg['roi'] = {'x': x/scale, 'y': y/scale, 'w': w/scale, 'h': h/scale}
+
+    else:
+        cfg['images'] = copy.deepcopy(cfg['images_original'])
+        cfg['out_dir'] = copy.deepcopy(cfg['out_dir_original'])
+        cfg['roi'] = cfg['roi_original'].copy()
+
+        
+
 
 def build_cfg(user_cfg):
     """
@@ -179,7 +200,6 @@ def adjust_tile_size():
     """
     Adjust the size of the tiles.
     """
-
     tile_w = min(cfg['roi']['w'], cfg['tile_size'])  # tile width
     ntx = int(np.round(float(cfg['roi']['w']) / tile_w))
     # ceil so that, if needed, the last tile is slightly smaller
@@ -235,7 +255,7 @@ def get_tile_dir(x, y, w, h):
                         'col_{:07d}_width_{}'.format(x, w))
 
 
-def create_tile(coords, neighborhood_coords_dict):
+def create_tile(coords, neighborhood_coords_dict, coarse_F=None, scale=1):
     tile = {}
     x, y, w, h = coords
     tile['dir'] = os.path.join(cfg['out_dir'], get_tile_dir(x, y, w, h))
@@ -256,11 +276,43 @@ def create_tile(coords, neighborhood_coords_dict):
     tile_json = os.path.join(get_tile_dir(x,y,w,h),'config.json')
     tile['json'] = tile_json
 
-    tile['coarse_F'] = None
+    tile['coarse_F'] = coarse_F
+    tile['scale'] = scale
 
     return tile
 
-def tiles_full_info(tw, th, tiles_txt, create_masks=False):
+def get_coarse_F(coords, old_tiles, scale, old_centers):
+    """
+    Uses old tile dictionnary to get the closest coarse fundamental martix
+    """
+    if old_tiles is None:
+        return None
+    else:
+        if old_centers is None:
+            old_centers = get_old_centers(old_tiles)
+        absolute_coordinates = np.array([coord*scale for coord in coords])
+        center_tile = np.array([absolute_coordinates[0] + absolute_coordinates[2]/2, 
+                                absolute_coordinates[1] + absolute_coordinates[3]/2])
+        position = np.argmin(np.linalg.norm(center_tile-old_centers, axis=1))
+        coarse_F = copy.deepcopy(old_tiles[position]['coarse_F'])
+        return coarse_F
+        
+def get_old_centers(old_tiles):
+    """
+    Computes the centers of old tiles from the dictionary. 
+    """
+    if old_tiles is None:
+        return None
+    else:
+        old_scale = old_tiles[0]['scale']
+        old_centers = []
+        for old_tile in old_tiles:
+            old_coordinate = np.array([coord*old_scale for coord in old_tile['coordinates']])
+            old_centers.append(np.array([old_coordinate[0] + old_coordinate[2]/2, old_coordinate[1] + old_coordinate[3]/2]))
+        old_centers = np.array(old_centers)
+        return old_centers
+
+def tiles_full_info(tw, th, tiles_txt, create_masks=False, old_tiles=None, scale=1):
     """
     List the tiles to process and prepare their output directories structures.
 
@@ -280,10 +332,13 @@ def tiles_full_info(tw, th, tiles_txt, create_masks=False):
     rw = cfg['roi']['w']
     rh = cfg['roi']['h']
 
+
     # build a tile dictionary for all non-masked tiles and store them in a list
     tiles = []
     # list tiles coordinates
     tiles_coords, neighborhood_coords_dict = compute_tiles_coordinates(rx, ry, rw, rh, tw, th)
+
+    old_centers = get_old_centers(old_tiles)
 
     if os.path.exists(tiles_txt) is False or create_masks is True:
         print('\ndiscarding masked tiles...')
@@ -296,7 +351,8 @@ def tiles_full_info(tw, th, tiles_txt, create_masks=False):
         for coords, mask in zip(tiles_coords,
                                 tiles_masks):
             if mask.any():  # there's at least one non-masked pixel in the tile
-                tile = create_tile(coords, neighborhood_coords_dict)
+                coarse_F = get_coarse_F(coords, old_tiles, scale, old_centers)
+                tile = create_tile(coords, neighborhood_coords_dict, coarse_F, scale)
                 tiles.append(tile)
 
                 # make tiles directories and store json configuration dumps
@@ -322,8 +378,10 @@ def tiles_full_info(tw, th, tiles_txt, create_masks=False):
                            mask.astype(np.uint8))
     else:
         if len(tiles_coords) == 1:
-            tiles.append(create_tile(tiles_coords[0], neighborhood_coords_dict))
+            coarse_F = get_coarse_F(coords, old_tiles, scale, old_centers)
+            tiles.append(create_tile(tiles_coords[0], neighborhood_coords_dict, coarse_F, scale))
         else:
+
             with open(tiles_txt, 'r') as f_tiles:
                 for config_json in f_tiles:
                     tile = {}
@@ -332,6 +390,7 @@ def tiles_full_info(tw, th, tiles_txt, create_masks=False):
                         tile_cfg = json.load(f_config)
                         roi = tile_cfg['roi']
                         coords = roi['x'], roi['y'], roi['w'], roi['h']
-                        tiles.append(create_tile(coords, neighborhood_coords_dict))
+                        coarse_F = get_coarse_F(coords, old_tiles, scale, old_centers)
+                        tiles.append(create_tile(coords, neighborhood_coords_dict, coarse_F, scale))
 
     return tiles

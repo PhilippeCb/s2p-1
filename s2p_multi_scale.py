@@ -31,6 +31,7 @@ import multiprocessing
 from osgeo import gdal
 import collections
 import shutil
+import copy
 
 gdal.UseExceptions()
 
@@ -120,7 +121,7 @@ def rectification_pair(tile, i):
     """
     out_dir = os.path.join(tile['dir'], 'pair_{}'.format(i))
     x, y, w, h = tile['coordinates']
-    coarse_F = tile['coarse_F']
+    coarse_F = copy.deepcopy(tile['coarse_F'])
     img1 = cfg['images'][0]['img']
     rpc1 = cfg['images'][0]['rpc']
     img2 = cfg['images'][i]['img']
@@ -178,8 +179,7 @@ def rectification_pair(tile, i):
                                                             hmargin=cfg['horizontal_margin'],
                                                             vmargin=cfg['vertical_margin'],
                                                             coarse_F=coarse_F)
-    tile['coarse_F'] = F 
-    print(tile)
+    tile['coarse_F'] = copy.deepcopy(F) 
     np.savetxt(os.path.join(out_dir, 'H_ref.txt'), H1, fmt='%12.6f')
     np.savetxt(os.path.join(out_dir, 'H_sec.txt'), H2, fmt='%12.6f')
     np.savetxt(os.path.join(out_dir, 'F.txt'), F, fmt='%12.6f')
@@ -189,6 +189,9 @@ def rectification_pair(tile, i):
     if cfg['clean_intermediate']:
         common.remove(os.path.join(out_dir,'pointing.txt'))
         common.remove(os.path.join(out_dir,'sift_matches.txt'))
+
+    return tile
+
 
 
 def stereo_matching(tile,i):
@@ -731,6 +734,8 @@ def main(user_cfg, steps=ALL_STEPS):
     if cfg['max_processes'] is not None:
         nb_workers = cfg['max_processes']
 
+    tiles = None
+
     for scale in user_cfg['scales']:
         modifier.scale_and_crop(cfg['images'][0]['img'], cfg['images'][0]['rpc'], 
                      cfg['temporary_dir'], "bilinear", scale, crop=None, suffix="_0_{}".format(scale))
@@ -744,7 +749,8 @@ def main(user_cfg, steps=ALL_STEPS):
         tw, th = initialization.adjust_tile_size()
         tiles_txt = os.path.join(cfg['temporary_dir'],'tiles.txt')
         create_masks = 'initialisation' in steps
-        tiles = initialization.tiles_full_info(tw, th, tiles_txt, create_masks)
+
+        tiles = initialization.tiles_full_info(tw, th, tiles_txt, create_masks, tiles, scale)
 
         if 'initialisation' in steps:
             # Write the list of json files to outdir/tiles.txt
@@ -766,13 +772,15 @@ def main(user_cfg, steps=ALL_STEPS):
 
         if 'rectification' in steps:
             print('rectifying tiles...')
-            parallel.launch_calls(rectification_pair, tiles_pairs, nb_workers)
+            tiles = parallel.launch_calls(rectification_pair, tiles_pairs, nb_workers)
 
-    return 0
+
+        initialization.update_multi_scale_cfg(cfg['temporary_dir'], scale, before_rectification=False)
+
     tw, th = initialization.adjust_tile_size()
     tiles_txt = os.path.join(cfg['out_dir'],'tiles.txt')
     create_masks = 'initialisation' in steps
-    tiles = initialization.tiles_full_info(tw, th, tiles_txt, create_masks)
+    tiles = initialization.tiles_full_info(tw, th, tiles_txt, create_masks, tiles)
 
     if 'initialisation' in steps:
         # Write the list of json files to outdir/tiles.txt
